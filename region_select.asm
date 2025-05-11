@@ -7,12 +7,18 @@
 ; * Increases the number of pages in the region selection screen
 ; * Increases the maximum total number of regions in the region selection screen
 ; * Changes the default region (from 6=Tokyo)
+; To build the US patch: `armips region_select.asm`
+; To build the EU patch: `armips region_select.asm -definelabel europe 1`
 
 .gba
-.open "scriptEd/shinbok-edit.gba", "region_select.gba", 0x08000000
+.open "scriptEd/shinbok-edit.gba", \
+	"region_select_" + (defined(europe) ? "eu" : "us") + ".gba", \
+	0x08000000
 
-RegionPageCount equ 41
-DefaultRegionId equ 121
+RegionPageCount equ (defined(europe) ? 21 : 20)
+RegionNameOffset equ (defined(europe) ? 20 : 0)
+DefaultRegionId equ (defined(europe) ? 1 : 15)
+RegionListKeyword equ (defined(europe) ? 'P' : 'E')
 
 
 ; =================================================================================================
@@ -36,12 +42,17 @@ Text_FindChar equ 0x0803223c
 Text_LookupString equ 0x0821add4
 
 ; === Bytecode interpreter ===
-; (PC = program counter of the bytecode interpreter)
-; void Script_SetPc(void* pc)
+; (PC = program counter of the bytecode interpreter), returns pc
+; void* Script_SetPc(void* pc)
 Script_SetPc equ 0x821a960
 ; void* Script_SeekToKeyword(char kw) - Advances the PC until the next keyword instruction with
 ; the specified keyword
 Script_SeekToKeyword equ 0x0821a96c
+; void Script_PushCtrlNextKeyword(void* pc)
+; Maintenance for Script_SeekToKeyword
+Script_PushCtrlNextKeyword equ 0x0821a940
+; void Script_PopCtrlNextKeyword()
+Script_PopCtrlNextKeyword equ 0x0821a950
 ; void* Script_GetPc()
 Script_GetPc equ 0x0821ab18
 ; i32 Script_GetValue() - Evaluates a value at the current PC (always an integer)
@@ -94,7 +105,7 @@ Script_ParseStringRef equ 0x0821aabc
 ; =================================================================================================
 .org 0x081dc6d0
 .area 132
-push {r4, lr}
+push {r4, r5, lr}
 
 ; Set "1st region index of current page"
 ; r4 = page number = *(menu + 0x1c)
@@ -108,12 +119,6 @@ add r2, r4
 ldrb r2, [r2]
 str r2, [r1]
 
-; Erase space for the page name
-mov r0, #5
-mov r1, #4
-mov r2, #20
-mov r3, #2
-bl Menu_EraseRect
 ; Erase space for the region names
 mov r0, #4
 mov r1, #7
@@ -125,6 +130,7 @@ bl Menu_EraseRect
 ldr r0, =0x02000310
 ldr r0, [r0]
 bl Script_ParseStringRef
+add r0, RegionNameOffset
 add r0, r4
 ; set r4 = string for current page
 bl Text_LookupString
@@ -150,32 +156,33 @@ bl Menu_DrawText
 
 ; HACK: Manually change palette of the page name. Menu_DrawChar (called by Menu_DrawText)
 ; will hardcode the palette to 0xf, we want 0x3 to make the page name stand out more
-mov r4, 0xc
-lsl r4, r4, #12 ; r4 = 0xc000 = adjustment for each tile (0xf000 - 0x3000)
-; Set r0 = pointer to row 4 column 5
-;     r1 = pointer to row 5 column 5
-;     r2 = column byte offset/loop variable (38)
 mov r0, #0
 bl Video_GetBackgroundMap
-add r0, 0xff
-add r0, #11
-mov r1, r0
-add r1, 0x40
-mov r2, #38
+mov r4, r0      ; r4 = start of tilemap buffer (this is in EWRAM, not VRAM!)
+mov r5, 0xc
+lsl r5, r5, #12 ; r5 = 0xc000 = adjustment for each tile (0xf000 - 0x3000)
+mov r1, #4      ; r1 = row coordinate
 
-@@loop:
-; Transform row 4
-ldrh r3, [r0, r2]
-sub r3, r4
-strh r3, [r0, r2]
-; Transform row 5
-ldrh r3, [r1, r2]
-sub r3, r4
-strh r3, [r1, r2]
-sub r2, #2
-bge @@loop
+@@row_loop:
+lsl r0, r1, #5  ; r0 = r1 * 0x20 = tile offset of row start
+add r0, #5      ; r0 = tile offset of column start
+lsl r0, #1      ; r0 = byte offset of column start
+add r0, r4      ; r0 = address of column start
+mov r2, #20     ; r2 = loop variable - remaining number of columns to change
 
-pop {r4, pc}
+@@column_loop:
+ldrh r3, [r0]
+sub r3, r5
+strh r3, [r0]
+add r0, #2
+sub r2, #1
+bne @@column_loop
+
+add r1, #1
+cmp r1, #5
+ble @@row_loop
+
+pop {r4, r5, pc}
 .pool
 .endarea
 
@@ -223,6 +230,7 @@ b 0x0822ad76
 cmp r0, #0xff
 
 .org 0x081dcab6 :: db DefaultRegionId
+.org 0x081dcb62 :: bl Time_SeekToRegionBytecode
 
 .org 0x081dcbc6
 .area 46, 0
@@ -306,22 +314,24 @@ ldr r0, [r0, #8]   ; Load latitude
 @@SelectedRegionId equ r4
 @@RemainingRegionsOnPage equ r5
 @@SelectedRegionFound equ r6
+@@GlobalSaveData equ r7
 @@StackSize equ #12
 
 .area 236
-push {r4, r5, r6, lr}
+push {r4-r7, lr}
 sub sp, @@stackSize
 
 mov r0, 'd'
 bl Script_SeekToKeyword
-cmp r0, #0
-beq @@ret
+; Should put a if (!r0) { return; } here, but we don't have enough space :(
+; cmp r0, #0 :: beq @@ret
 ; Move PC to the region data bytecode
 bl Script_GetValueSafe
-bl Script_SetPc
+bl Time_SeekToRegionBytecode
 ; Load selected region ID
 ldr r0, =g_ptrGlobalSaveData
-ldrb @@SelectedRegionId, [r0, #0x18]
+ldr @@GlobalSaveData, [r0]
+ldrb @@SelectedRegionId, [@@GlobalSaveData, #0x18]
 mov @@SelectedRegionFound, #0
 
 @@pages_loop:
@@ -329,10 +339,8 @@ bl Script_GetPc
 cmp r0, #0
 beq @@pages_done
 bl Script_GetValue ; r0 = page number
-mov r1, #1
-neg r1, r1
-cmp r0,r1
-beq @@pages_done
+cmp r0, #0
+blt @@pages_done
 ; Parse this page
 bl Script_GetValue
 mov @@RemainingRegionsOnPage, r0
@@ -340,16 +348,20 @@ mov @@RemainingRegionsOnPage, r0
 @@region_loop:
 cmp @@RemainingRegionsOnPage, #0
 beq @@pages_loop
-bl Script_SetPc
+bl Script_GetPc
 cmp r0, #0
 beq @@pages_loop
 bl Script_GetValue ; Load region ID
 cmp r0, @@SelectedRegionId ; Is it the selected region?
 beq @@found_selected_region
 cmp r0, DefaultRegionId ; Is it the fallback region?
-bne @@region_next
+beq @@region_found
 
-b @@region_found
+bl Script_GetValue ; discard tz_offset
+bl Script_GetValue ; discard longitude
+bl Script_GetValue ; discard latitude
+b @@region_next
+
 @@found_selected_region:
 mov @@SelectedRegionFound, #1
 
@@ -371,21 +383,23 @@ b @@region_loop
 @@pages_done:
 ; Didn't find the selected region :(
 mov @@SelectedRegionId, DefaultRegionId
-ldr r0, =g_ptrGlobalSaveData
-strb @@SelectedRegionId, [r0, #0x18]
+strb @@SelectedRegionId, [@@GlobalSaveData, #0x18]
 
 @@exit_search:
 ldr r0, [sp, #0]
 ldr r1, [sp, #4]
 ldr r2, [sp, #8]
 bl Time_CalculateSunriseSunset
+; *0x03005439 = 0, reusing g_ptrGlobalSaveData for address calculation to not waste more literal
+; pool space than we have available
 mov r0, #0
-ldr r1, =0x03005439
+ldr r1, =g_ptrGlobalSaveData
+add r1, #65
 strb r0, [r1]
 
 @@ret:
 add sp, @@stackSize
-pop {r4, r5, r6, pc}
+pop {r4-r7, pc}
 
 ; =================================================================================================
 ; u32[2] Time_AddOffset(hours, minutes, offset)
@@ -450,8 +464,19 @@ add r0, #24
 @@calc_ret:
 pop {r4, r5, pc}
 
-; There is a lot of free space here now, can add another function here if needed
+
+Time_SeekToRegionBytecode:
+; Precondition: r0 = pointer to start of region bytecode
+push {lr}
+bl Script_SetPc
+bl Script_PushCtrlNextKeyword
+mov r0, RegionListKeyword
+bl Script_SeekToKeyword
+bl Script_PopCtrlNextKeyword
+pop {pc}
+
 .pool
+
 .endarea
 
 ; =================================================================================================

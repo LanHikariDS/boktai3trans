@@ -27,7 +27,7 @@ latest_localization.ips  - Includes all above patches, and localizes names to ma
 status_screen.ips	 - Translates small text on the Status/Inventory/Store screens (Add to latest_translation.ip when complete)
 solar_sensor_hack.ips    - Change solar sensor by pressing left/right while holding R
 menus.ips		 - Translates small text on the Pause menu, predates status_screen.ips
-region_select.ips        - Patches region selection screen to support time zones, more regions, and more pages
+region_select_us.ips     - Patches region selection screen to support time zones, more regions, and more pages
 
 /MenuEd/   Spikeman's graphical tile editor
 
